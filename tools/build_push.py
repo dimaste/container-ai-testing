@@ -25,6 +25,10 @@ def load_json(path: Path) -> Any:
         return json.load(f)
 
 
+def escape_docker_quoted(value: str) -> str:
+    return value.replace('"', '\\"')
+
+
 def fetch_text(url: str, timeout_seconds: int = 30) -> str:
     with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
         return response.read().decode("utf-8")
@@ -183,9 +187,11 @@ def dockerfile_for_case(base_image: str, case: dict[str, Any], canary: str, sett
     inline_payload = payload.replace("\r", " ").replace("\n", " ").strip()
 
     if carrier == "label":
-        lines.append(f'LABEL {payload_label_key}="{inline_payload.replace(chr(34), r"\\\"")}"')
+        escaped_payload = escape_docker_quoted(inline_payload)
+        lines.append(f'LABEL {payload_label_key}="{escaped_payload}"')
     elif carrier == "env":
-        lines.append(f'ENV {payload_env_key}="{inline_payload.replace(chr(34), r"\\\"")}"')
+        escaped_payload = escape_docker_quoted(inline_payload)
+        lines.append(f'ENV {payload_env_key}="{escaped_payload}"')
     elif carrier == "cmd":
         escaped = inline_payload.replace("\\", "\\\\").replace("\"", "\\\"")
         lines.append(f'CMD ["sh", "-lc", "echo \"{escaped}\""]')
@@ -355,7 +361,7 @@ def main() -> None:
     for case in cases:
         validate_case(case)
 
-    ts = dt.datetime.utcnow().strftime(settings["timestamp_format"])
+    ts = dt.datetime.now(dt.timezone.utc).strftime(settings["timestamp_format"])
     suite_name = safe_tag(suite_path.stem)
 
     if settings["pull_base"]:
