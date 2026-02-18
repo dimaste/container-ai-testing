@@ -225,6 +225,15 @@ def validate_case(case: dict[str, Any]) -> None:
         raise ValueError(f"case {case['id']}: carrier=file requires non-empty 'path'")
 
 
+def build_image_ref(registry: str, repo: str, image_name: str, tag: str) -> str:
+    registry_clean = registry.strip().rstrip("/")
+    repo_clean = repo.strip().strip("/")
+    image_clean = image_name.strip().strip("/")
+    if not registry_clean or not repo_clean or not image_clean:
+        raise ValueError("registry, repo, and image_name must be non-empty")
+    return f"{registry_clean}/{repo_clean}/{image_clean}:{tag}"
+
+
 def get_effective_settings(args: argparse.Namespace) -> dict[str, Any]:
     config_path = Path(args.config)
     config = load_json(config_path)
@@ -234,6 +243,7 @@ def get_effective_settings(args: argparse.Namespace) -> dict[str, Any]:
         "container_cli_args": [],
         "insecure_registry": False,
         "repo": "llmsec",
+        "image_name": "mutated",
         "outdir": "out",
         "push": False,
         "pull_base": False,
@@ -258,7 +268,7 @@ def get_effective_settings(args: argparse.Namespace) -> dict[str, Any]:
     }
     settings = {**defaults, **config}
 
-    for key in ["base_image", "registry", "suite"]:
+    for key in ["base_image", "registry", "repo", "image_name", "suite"]:
         if key not in settings or not str(settings[key]).strip():
             raise ValueError(f"missing required config field: {key}")
 
@@ -269,6 +279,7 @@ def get_effective_settings(args: argparse.Namespace) -> dict[str, Any]:
         "base_image",
         "registry",
         "repo",
+        "image_name",
         "suite",
         "external_suite",
         "include_external_suite",
@@ -303,6 +314,7 @@ def main() -> None:
     parser.add_argument("--base-image", dest="base_image")
     parser.add_argument("--registry")
     parser.add_argument("--repo")
+    parser.add_argument("--image-name", dest="image_name")
     parser.add_argument("--suite")
     parser.add_argument("--outdir")
     parser.add_argument("--tag-prefix", dest="tag_prefix")
@@ -372,6 +384,7 @@ def main() -> None:
         "base_image": settings["base_image"],
         "registry": settings["registry"],
         "repo": settings["repo"],
+        "image_name": settings["image_name"],
         "suite": str(suite_path),
         "external_suite": settings["external_suite"] if settings["include_external_suite"] else None,
         "external_suite_cases_count": len(external_suite_cases),
@@ -390,7 +403,12 @@ def main() -> None:
         if settings["tag_prefix"]:
             tag_core = f"{safe_tag(settings['tag_prefix'])}-{tag_core}"
 
-        tag = f"{settings['registry']}/{settings['repo']}:{tag_core}"
+        tag = build_image_ref(
+            registry=str(settings["registry"]),
+            repo=str(settings["repo"]),
+            image_name=str(settings["image_name"]),
+            tag=tag_core,
+        )
 
         workdir = outdir / f"work_{suite_name}_{cid}_{ts}"
         workdir.mkdir(parents=True, exist_ok=True)

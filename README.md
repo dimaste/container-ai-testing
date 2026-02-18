@@ -22,7 +22,8 @@ Edit `config/build_push.config.json`:
 - `container_cli_args`: extra CLI args, e.g. `["--namespace", "k8s.io"]` for nerdctl
 - `insecure_registry`: if `true`, adds `--insecure-registry` for `nerdctl`; for Docker use daemon `insecure-registries`
 - `registry`: target registry host:port
-- `repo`: repository name in registry
+- `repo`: repository/group path in registry
+- `image_name`: image name inside repository path
 - `suite`: path to cases JSON
 - `external_suite`: path to external cases JSON
 - `include_external_suite`: include `external_suite` in build/push run
@@ -123,9 +124,18 @@ python3 tools/build_push.py \
   --base-image your/base:image-tag \
   --registry localhost:5001 \
   --repo llmsec \
+  --image-name llmsec-mutated \
   --suite cases/suite_basic.json \
   --push
 ```
+
+Image reference format:
+
+`<registry>/<repo>/<image_name>:<tag>`
+
+Example:
+
+`localhost:5001/llmsec/llmsec-mutated:suite_basic-label_01-20260218170000`
 
 Output:
 
