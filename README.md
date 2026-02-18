@@ -31,6 +31,12 @@ Edit `config/build_push.config.json`:
 - `pull_base`: pull base image before builds
 - `tag_prefix`: optional prefix for tags
 - `timestamp_format`: UTC timestamp format for tags/runlist
+- `trace_labels_enabled`: add/remove internal trace labels (`case_id`, `canary`, `carrier`)
+- `payload_label_key`: label key used for `label` carrier (default: `payload`)
+- `payload_env_key`: env var key used for `env` carrier (default: `PAYLOAD`)
+- `expand_case_to_all_carriers`: if `true`, each case is duplicated into all carriers
+- `expand_carriers`: carrier list used by expansion
+- `expand_file_path_template`: file path template used for expanded `file` cases
 - `external_prompts_enabled`: include external prompts into generated test cases
 - `external_prompt_manifest`: file with external sources (URL + parser settings)
 - `external_prompts_limit`: cap for total external prompts

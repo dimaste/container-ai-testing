@@ -136,25 +136,56 @@ def load_external_cases(settings: dict[str, Any]) -> list[dict[str, Any]]:
     return cases
 
 
-def dockerfile_for_case(base_image: str, case: dict[str, Any], canary: str) -> str:
+def expand_cases_to_all_carriers(cases: list[dict[str, Any]], settings: dict[str, Any]) -> list[dict[str, Any]]:
+    if not settings.get("expand_case_to_all_carriers", False):
+        return cases
+
+    carriers = settings.get("expand_carriers", ["label", "env", "file", "cmd"])
+    if not isinstance(carriers, list) or not carriers:
+        raise ValueError("expand_carriers must be a non-empty list")
+
+    path_template = str(settings.get("expand_file_path_template", "/tmp/payload_{id}.txt"))
+    expanded: list[dict[str, Any]] = []
+    for case in cases:
+        payload = case["payload"]
+        base_id = safe_tag(str(case["id"]))
+        for carrier in carriers:
+            new_case = {
+                "id": f"{base_id}_{safe_tag(carrier)}",
+                "carrier": carrier,
+                "payload": payload,
+            }
+            if carrier == "file":
+                new_case["path"] = path_template.format(id=base_id, carrier=safe_tag(carrier))
+            expanded.append(new_case)
+    return expanded
+
+
+def dockerfile_for_case(base_image: str, case: dict[str, Any], canary: str, settings: dict[str, Any]) -> str:
     cid = case["id"]
     carrier = case["carrier"]
     payload = case["payload"]
+    trace_labels_enabled = bool(settings.get("trace_labels_enabled", False))
+    trace_label_prefix = str(settings.get("trace_label_prefix", "org.llmsec"))
+    payload_label_key = str(settings.get("payload_label_key", "payload"))
+    payload_env_key = str(settings.get("payload_env_key", "PAYLOAD"))
 
-    # Shared metadata for traceability
-    lines = [
-        f"FROM {base_image}",
-        f'LABEL org.llmsec.case_id="{cid}"',
-        f'LABEL org.llmsec.canary="{canary}"',
-        f'LABEL org.llmsec.carrier="{carrier}"',
-    ]
+    lines = [f"FROM {base_image}"]
+    if trace_labels_enabled:
+        lines.extend(
+            [
+                f'LABEL {trace_label_prefix}.case_id="{cid}"',
+                f'LABEL {trace_label_prefix}.canary="{canary}"',
+                f'LABEL {trace_label_prefix}.carrier="{carrier}"',
+            ]
+        )
 
     inline_payload = payload.replace("\r", " ").replace("\n", " ").strip()
 
     if carrier == "label":
-        lines.append(f'LABEL org.llmsec.payload="{inline_payload.replace(chr(34), r"\\\"")}"')
+        lines.append(f'LABEL {payload_label_key}="{inline_payload.replace(chr(34), r"\\\"")}"')
     elif carrier == "env":
-        lines.append(f'ENV LLMSEC_PAYLOAD="{inline_payload.replace(chr(34), r"\\\"")}"')
+        lines.append(f'ENV {payload_env_key}="{inline_payload.replace(chr(34), r"\\\"")}"')
     elif carrier == "cmd":
         escaped = inline_payload.replace("\\", "\\\\").replace("\"", "\\\"")
         lines.append(f'CMD ["sh", "-lc", "echo \"{escaped}\""]')
@@ -175,7 +206,7 @@ def dockerfile_for_case(base_image: str, case: dict[str, Any], canary: str) -> s
     else:
         raise ValueError(f"case {cid}: unknown carrier '{carrier}'")
 
-    return "\\n".join(lines) + "\\n"
+    return "\n".join(lines) + "\n"
 
 
 def validate_case(case: dict[str, Any]) -> None:
@@ -202,8 +233,15 @@ def get_effective_settings(args: argparse.Namespace) -> dict[str, Any]:
         "pull_base": False,
         "tag_prefix": "",
         "timestamp_format": "%Y%m%d%H%M%S",
+        "trace_labels_enabled": False,
+        "trace_label_prefix": "org.llmsec",
+        "payload_label_key": "payload",
+        "payload_env_key": "PAYLOAD",
         "external_suite": "cases/suite_external.json",
         "include_external_suite": True,
+        "expand_case_to_all_carriers": False,
+        "expand_carriers": ["label", "env", "file", "cmd"],
+        "expand_file_path_template": "/usr/share/doc/llmsec/expanded/{id}_{carrier}.txt",
         "external_prompts_enabled": False,
         "external_prompt_manifest": "cases/prompt_sources_promptfoo.json",
         "external_prompts_limit": 0,
@@ -312,6 +350,7 @@ def main() -> None:
 
     external_cases = load_external_cases(settings)
     cases.extend(external_cases)
+    cases = expand_cases_to_all_carriers(cases, settings)
 
     for case in cases:
         validate_case(case)
@@ -350,7 +389,7 @@ def main() -> None:
         workdir = outdir / f"work_{suite_name}_{cid}_{ts}"
         workdir.mkdir(parents=True, exist_ok=True)
 
-        dockerfile = dockerfile_for_case(settings["base_image"], case, canary)
+        dockerfile = dockerfile_for_case(settings["base_image"], case, canary, settings)
         (workdir / "Dockerfile").write_text(dockerfile, encoding="utf-8")
 
         run(f"{cli_prefix} build -t {shlex.quote(tag)} -f Dockerfile .", cwd=workdir)
