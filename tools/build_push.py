@@ -3,6 +3,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import os
 import random
 import shlex
 import subprocess
@@ -234,6 +235,76 @@ def build_image_ref(registry: str, repo: str, image_name: str, tag: str) -> str:
     return f"{registry_clean}/{repo_clean}/{image_clean}:{tag}"
 
 
+def default_docker_config_dirs(container_cli: str) -> list[Path]:
+    dirs: list[Path] = []
+    env_dir = os.environ.get("DOCKER_CONFIG", "").strip()
+    if env_dir:
+        dirs.append(Path(env_dir).expanduser())
+
+    home = Path.home()
+    # Most common location for both docker and nerdctl.
+    dirs.append(home / ".docker")
+    # nerdctl may also use config under ~/.config/nerdctl.
+    dirs.append(home / ".config" / "nerdctl")
+    # Some environments rely on containers auth file location.
+    dirs.append(home / ".config" / "containers")
+
+    deduped: list[Path] = []
+    seen = set()
+    for d in dirs:
+        key = str(d)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(d)
+    return deduped
+
+
+def resolve_docker_config_dir(settings: dict[str, Any], container_cli: str, registry: str) -> Path:
+    configured = str(settings.get("docker_config", "")).strip()
+    if configured:
+        return Path(configured).expanduser()
+
+    candidates = default_docker_config_dirs(container_cli)
+    require_auth = bool(settings.get("require_registry_auth_entry", True))
+
+    if require_auth:
+        for candidate in candidates:
+            if has_registry_auth_entry(candidate, registry):
+                return candidate
+
+    for candidate in candidates:
+        if (candidate / "config.json").exists():
+            return candidate
+
+    return candidates[0]
+
+
+def has_registry_auth_entry(config_dir: Path, registry: str) -> bool:
+    config_path = config_dir / "config.json"
+    if not config_path.exists():
+        return False
+
+    try:
+        data = load_json(config_path)
+    except Exception:
+        return False
+
+    if not isinstance(data, dict):
+        return False
+
+    keys = {registry, f"https://{registry}", f"http://{registry}"}
+    auths = data.get("auths", {})
+    helpers = data.get("credHelpers", {})
+
+    if isinstance(auths, dict):
+        if any(key in auths for key in keys):
+            return True
+    if isinstance(helpers, dict):
+        if any(key in helpers for key in keys):
+            return True
+    return False
+
+
 def get_effective_settings(args: argparse.Namespace) -> dict[str, Any]:
     config_path = Path(args.config)
     config = load_json(config_path)
@@ -241,6 +312,8 @@ def get_effective_settings(args: argparse.Namespace) -> dict[str, Any]:
     defaults = {
         "container_cli": "docker",
         "container_cli_args": [],
+        "docker_config": "",
+        "require_registry_auth_entry": True,
         "insecure_registry": False,
         "repo": "llmsec",
         "image_name": "mutated",
@@ -275,6 +348,8 @@ def get_effective_settings(args: argparse.Namespace) -> dict[str, Any]:
     # CLI overrides (optional)
     for key in [
         "container_cli",
+        "docker_config",
+        "require_registry_auth_entry",
         "insecure_registry",
         "base_image",
         "registry",
@@ -311,6 +386,7 @@ def main() -> None:
 
     # Optional overrides for reuse across environments
     parser.add_argument("--container-cli", dest="container_cli")
+    parser.add_argument("--docker-config", dest="docker_config")
     parser.add_argument("--base-image", dest="base_image")
     parser.add_argument("--registry")
     parser.add_argument("--repo")
@@ -335,6 +411,21 @@ def main() -> None:
     if not isinstance(cli_args, list):
         raise ValueError("container_cli_args must be a JSON array of CLI arguments")
 
+    docker_config_dir = resolve_docker_config_dir(
+        settings=settings,
+        container_cli=container_cli,
+        registry=str(settings["registry"]),
+    )
+    if bool(settings.get("require_registry_auth_entry", True)):
+        if not has_registry_auth_entry(docker_config_dir, str(settings["registry"])):
+            checked = [str(d / "config.json") for d in default_docker_config_dirs(container_cli)]
+            raise ValueError(
+                f"No registry auth entry for '{settings['registry']}'. "
+                f"Selected config: '{docker_config_dir / 'config.json'}'. "
+                f"Checked defaults: {checked}. Run '{container_cli} login {settings['registry']}' "
+                "or set docker_config explicitly."
+            )
+
     insecure_registry = bool(settings["insecure_registry"])
     effective_cli_args = [str(arg) for arg in cli_args]
     if insecure_registry and container_cli == "nerdctl":
@@ -346,7 +437,8 @@ def main() -> None:
             "insecure-registries config; no CLI flag is applied."
         )
 
-    cli_prefix = " ".join([shlex.quote(container_cli)] + [shlex.quote(arg) for arg in effective_cli_args])
+    cli_cmd = " ".join([shlex.quote(container_cli)] + [shlex.quote(arg) for arg in effective_cli_args])
+    cli_prefix = f"DOCKER_CONFIG={shlex.quote(str(docker_config_dir))} {cli_cmd}"
 
     suite_path = Path(settings["suite"])
     outdir = Path(settings["outdir"])
@@ -391,6 +483,7 @@ def main() -> None:
         "external_cases_count": len(external_cases),
         "container_cli": container_cli,
         "container_cli_args": effective_cli_args,
+        "docker_config": str(docker_config_dir),
         "insecure_registry": insecure_registry,
         "images": [],
     }

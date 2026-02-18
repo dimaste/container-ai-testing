@@ -20,6 +20,8 @@ Edit `config/build_push.config.json`:
 - `base_image`: source image to mutate
 - `container_cli`: `docker` or `nerdctl`
 - `container_cli_args`: extra CLI args, e.g. `["--namespace", "k8s.io"]` for nerdctl
+- `docker_config`: optional Docker config directory; if empty, uses `DOCKER_CONFIG` env or `~/.docker`
+- `require_registry_auth_entry`: if `true`, fail early when registry auth entry is missing in selected config
 - `insecure_registry`: if `true`, adds `--insecure-registry` for `nerdctl`; for Docker use daemon `insecure-registries`
 - `registry`: target registry host:port
 - `repo`: repository/group path in registry
@@ -111,9 +113,21 @@ Use nerdctl from config:
 ```json
 {
   "container_cli": "nerdctl",
-  "container_cli_args": ["--namespace", "k8s.io"]
+  "container_cli_args": ["--namespace", "k8s.io"],
+  "docker_config": "/path/to/docker-config-dir"
 }
 ```
+
+Auth reuse notes:
+
+- Login credentials are reused only when the same CLI, same user, and same Docker config are used.
+- If you login with `nerdctl`, set `"container_cli": "nerdctl"`.
+- If `docker_config` is empty, the script auto-searches default locations and picks one:
+  - `$DOCKER_CONFIG`
+  - `~/.docker`
+  - `~/.config/nerdctl`
+  - `~/.config/containers`
+- If your credentials are in a custom config dir, set `"docker_config"` explicitly.
 
 Override specific values when needed:
 

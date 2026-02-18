@@ -1,6 +1,8 @@
 {
   "container_cli": "docker",
   "container_cli_args": [],
+  "docker_config": "",
+  "require_registry_auth_entry": true,
   "insecure_registry": false,
   "base_image": "your/base:image-tag",
   "registry": "localhost:5001",
