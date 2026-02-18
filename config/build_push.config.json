@@ -1,0 +1,11 @@
+{
+  "base_image": "your/base:image-tag",
+  "registry": "localhost:5001",
+  "repo": "llmsec",
+  "suite": "cases/suite_basic.json",
+  "outdir": "out",
+  "push": true,
+  "pull_base": false,
+  "tag_prefix": "",
+  "timestamp_format": "%Y%m%d%H%M%S"
+}
