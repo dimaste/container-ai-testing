@@ -1,0 +1,22 @@
+{
+  "upstream": {
+    "repository": "https://github.com/promptfoo/promptfoo",
+    "commit": "15a353f07b19e452581ee601ce96b29900fa2bf1",
+    "plugin_files": [
+      "src/redteam/plugins/cyberseceval.ts",
+      "src/redteam/plugins/xstest.ts",
+      "src/redteam/plugins/harmbench.ts",
+      "src/redteam/plugins/pliny.ts"
+    ]
+  },
+  "sources": [
+    {
+      "id": "promptfoo_cyberseceval_en",
+      "format": "json",
+      "url": "https://raw.githubusercontent.com/promptfoo/promptfoo/refs/tags/0.119.14/examples/cyberseceval/prompt_injection.json",
+      "field": "user_input",
+      "limit": 0,
+      "shuffle": true
+    }
+  ]
+}

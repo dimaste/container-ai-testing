@@ -1,11 +1,23 @@
 {
+  "container_cli": "docker",
+  "container_cli_args": [],
+  "insecure_registry": false,
   "base_image": "your/base:image-tag",
   "registry": "localhost:5001",
   "repo": "llmsec",
   "suite": "cases/suite_basic.json",
+  "external_suite": "cases/suite_external.json",
+  "include_external_suite": true,
   "outdir": "out",
   "push": true,
   "pull_base": false,
   "tag_prefix": "",
-  "timestamp_format": "%Y%m%d%H%M%S"
+  "timestamp_format": "%Y%m%d%H%M%S",
+  "external_prompts_enabled": false,
+  "external_prompt_manifest": "cases/prompt_sources_promptfoo.json",
+  "external_prompts_limit": 0,
+  "external_case_prefix": "ext",
+  "external_carrier_cycle": ["label", "env", "file", "cmd"],
+  "external_file_path_template": "/usr/share/doc/llmsec/{source}/payload_{idx:04d}.txt",
+  "external_fetch_timeout_seconds": 30
 }

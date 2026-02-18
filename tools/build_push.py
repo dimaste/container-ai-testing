@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import datetime as dt
 import json
+import random
 import shlex
 import subprocess
+import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
@@ -22,6 +25,117 @@ def load_json(path: Path) -> Any:
         return json.load(f)
 
 
+def fetch_text(url: str, timeout_seconds: int = 30) -> str:
+    with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
+        return response.read().decode("utf-8")
+
+
+def render_template(template: str, row: dict[str, Any]) -> str:
+    rendered = template
+    for key, value in row.items():
+        rendered = rendered.replace(f"{{{{{key}}}}}", str(value if value is not None else ""))
+    return rendered
+
+
+def extract_prompts_from_source(source: dict[str, Any], timeout_seconds: int) -> list[dict[str, str]]:
+    source_id = str(source["id"])
+    source_url = str(source["url"])
+    source_format = str(source["format"]).lower()
+    limit = int(source.get("limit", 0))
+    shuffle = bool(source.get("shuffle", False))
+
+    raw_text = fetch_text(source_url, timeout_seconds=timeout_seconds)
+    prompts: list[dict[str, str]] = []
+
+    if source_format == "json":
+        data = json.loads(raw_text)
+        if not isinstance(data, list):
+            raise ValueError(f"source {source_id}: expected JSON array")
+        field = source.get("field")
+        template = source.get("template")
+        if not field and not template:
+            raise ValueError(f"source {source_id}: set either 'field' or 'template'")
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            payload = (
+                render_template(str(template), row)
+                if template
+                else str(row.get(str(field), "")).strip()
+            )
+            payload = payload.strip()
+            if payload:
+                prompts.append({"source_id": source_id, "payload": payload})
+    elif source_format == "csv":
+        field = source.get("field")
+        template = source.get("template")
+        if not field and not template:
+            raise ValueError(f"source {source_id}: set either 'field' or 'template'")
+        reader = csv.DictReader(raw_text.splitlines())
+        for row in reader:
+            payload = (
+                render_template(str(template), row)
+                if template
+                else str(row.get(str(field), "")).strip()
+            )
+            payload = payload.strip()
+            if payload:
+                prompts.append({"source_id": source_id, "payload": payload})
+    else:
+        raise ValueError(f"source {source_id}: unsupported format '{source_format}'")
+
+    if shuffle:
+        random.Random(42).shuffle(prompts)
+    if limit > 0:
+        prompts = prompts[:limit]
+    return prompts
+
+
+def load_external_cases(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    if not settings["external_prompts_enabled"]:
+        return []
+
+    manifest_path = Path(settings["external_prompt_manifest"])
+    manifest = load_json(manifest_path)
+
+    if not isinstance(manifest, dict) or "sources" not in manifest:
+        raise ValueError("external prompt manifest must be a JSON object with 'sources'")
+    if not isinstance(manifest["sources"], list):
+        raise ValueError("external prompt manifest: 'sources' must be an array")
+
+    carriers = settings["external_carrier_cycle"]
+    if not isinstance(carriers, list) or not carriers:
+        raise ValueError("external_carrier_cycle must be a non-empty list")
+
+    timeout_seconds = int(settings["external_fetch_timeout_seconds"])
+    all_prompts: list[dict[str, str]] = []
+    for source in manifest["sources"]:
+        all_prompts.extend(extract_prompts_from_source(source, timeout_seconds=timeout_seconds))
+
+    max_total = int(settings["external_prompts_limit"])
+    if max_total > 0:
+        all_prompts = all_prompts[:max_total]
+
+    cases: list[dict[str, Any]] = []
+    prefix = safe_tag(str(settings["external_case_prefix"]))
+    path_template = str(settings["external_file_path_template"])
+
+    for idx, item in enumerate(all_prompts, start=1):
+        carrier = carriers[(idx - 1) % len(carriers)]
+        source_id = safe_tag(item["source_id"])
+        case_id = f"{prefix}_{source_id}_{idx:04d}"
+        case: dict[str, Any] = {
+            "id": case_id,
+            "carrier": carrier,
+            "payload": item["payload"],
+        }
+        if carrier == "file":
+            case["path"] = path_template.format(source=source_id, idx=idx)
+        cases.append(case)
+
+    return cases
+
+
 def dockerfile_for_case(base_image: str, case: dict[str, Any], canary: str) -> str:
     cid = case["id"]
     carrier = case["carrier"]
@@ -35,12 +149,14 @@ def dockerfile_for_case(base_image: str, case: dict[str, Any], canary: str) -> s
         f'LABEL org.llmsec.carrier="{carrier}"',
     ]
 
+    inline_payload = payload.replace("\r", " ").replace("\n", " ").strip()
+
     if carrier == "label":
-        lines.append(f'LABEL org.llmsec.payload="{payload.replace(chr(34), r"\\\"")}"')
+        lines.append(f'LABEL org.llmsec.payload="{inline_payload.replace(chr(34), r"\\\"")}"')
     elif carrier == "env":
-        lines.append(f'ENV LLMSEC_PAYLOAD="{payload.replace(chr(34), r"\\\"")}"')
+        lines.append(f'ENV LLMSEC_PAYLOAD="{inline_payload.replace(chr(34), r"\\\"")}"')
     elif carrier == "cmd":
-        escaped = payload.replace("\\", "\\\\").replace("\"", "\\\"")
+        escaped = inline_payload.replace("\\", "\\\\").replace("\"", "\\\"")
         lines.append(f'CMD ["sh", "-lc", "echo \"{escaped}\""]')
     elif carrier == "file":
         path = case.get("path")
@@ -77,12 +193,24 @@ def get_effective_settings(args: argparse.Namespace) -> dict[str, Any]:
     config = load_json(config_path)
 
     defaults = {
+        "container_cli": "docker",
+        "container_cli_args": [],
+        "insecure_registry": False,
         "repo": "llmsec",
         "outdir": "out",
         "push": False,
         "pull_base": False,
         "tag_prefix": "",
         "timestamp_format": "%Y%m%d%H%M%S",
+        "external_suite": "cases/suite_external.json",
+        "include_external_suite": True,
+        "external_prompts_enabled": False,
+        "external_prompt_manifest": "cases/prompt_sources_promptfoo.json",
+        "external_prompts_limit": 0,
+        "external_case_prefix": "ext",
+        "external_carrier_cycle": ["label", "env", "file", "cmd"],
+        "external_file_path_template": "/usr/share/doc/llmsec/{source}/payload_{idx:04d}.txt",
+        "external_fetch_timeout_seconds": 30,
     }
     settings = {**defaults, **config}
 
@@ -91,8 +219,20 @@ def get_effective_settings(args: argparse.Namespace) -> dict[str, Any]:
             raise ValueError(f"missing required config field: {key}")
 
     # CLI overrides (optional)
-    for key in ["base_image", "registry", "repo", "suite", "outdir", "tag_prefix", "timestamp_format"]:
-        value = getattr(args, key)
+    for key in [
+        "container_cli",
+        "insecure_registry",
+        "base_image",
+        "registry",
+        "repo",
+        "suite",
+        "external_suite",
+        "include_external_suite",
+        "outdir",
+        "tag_prefix",
+        "timestamp_format",
+    ]:
+        value = getattr(args, key, None)
         if value is not None:
             settings[key] = value
 
@@ -115,6 +255,7 @@ def main() -> None:
     parser.add_argument("--config", default="config/build_push.config.json", help="Path to JSON config file")
 
     # Optional overrides for reuse across environments
+    parser.add_argument("--container-cli", dest="container_cli")
     parser.add_argument("--base-image", dest="base_image")
     parser.add_argument("--registry")
     parser.add_argument("--repo")
@@ -131,6 +272,26 @@ def main() -> None:
     args = parser.parse_args()
     settings = get_effective_settings(args)
 
+    container_cli = str(settings["container_cli"]).strip()
+    if container_cli not in {"docker", "nerdctl"}:
+        raise ValueError("container_cli must be either 'docker' or 'nerdctl'")
+    cli_args = settings["container_cli_args"]
+    if not isinstance(cli_args, list):
+        raise ValueError("container_cli_args must be a JSON array of CLI arguments")
+
+    insecure_registry = bool(settings["insecure_registry"])
+    effective_cli_args = [str(arg) for arg in cli_args]
+    if insecure_registry and container_cli == "nerdctl":
+        if "--insecure-registry" not in effective_cli_args:
+            effective_cli_args.append("--insecure-registry")
+    if insecure_registry and container_cli == "docker":
+        print(
+            "WARNING: insecure_registry=true is set, but Docker requires daemon-level "
+            "insecure-registries config; no CLI flag is applied."
+        )
+
+    cli_prefix = " ".join([shlex.quote(container_cli)] + [shlex.quote(arg) for arg in effective_cli_args])
+
     suite_path = Path(settings["suite"])
     outdir = Path(settings["outdir"])
     outdir.mkdir(parents=True, exist_ok=True)
@@ -139,6 +300,19 @@ def main() -> None:
     if not isinstance(cases, list):
         raise ValueError("suite file must contain a JSON array of case objects")
 
+    external_suite_cases: list[dict[str, Any]] = []
+    if settings["include_external_suite"]:
+        external_suite_path = Path(settings["external_suite"])
+        if not external_suite_path.exists():
+            raise ValueError(f"external suite file not found: {external_suite_path}")
+        external_suite_cases = load_json(external_suite_path)
+        if not isinstance(external_suite_cases, list):
+            raise ValueError("external suite file must contain a JSON array of case objects")
+        cases.extend(external_suite_cases)
+
+    external_cases = load_external_cases(settings)
+    cases.extend(external_cases)
+
     for case in cases:
         validate_case(case)
 
@@ -146,7 +320,7 @@ def main() -> None:
     suite_name = safe_tag(suite_path.stem)
 
     if settings["pull_base"]:
-        run(f"docker pull {shlex.quote(settings['base_image'])}")
+        run(f"{cli_prefix} pull {shlex.quote(settings['base_image'])}")
 
     runlist = {
         "generated_at_utc": ts,
@@ -154,6 +328,12 @@ def main() -> None:
         "registry": settings["registry"],
         "repo": settings["repo"],
         "suite": str(suite_path),
+        "external_suite": settings["external_suite"] if settings["include_external_suite"] else None,
+        "external_suite_cases_count": len(external_suite_cases),
+        "external_cases_count": len(external_cases),
+        "container_cli": container_cli,
+        "container_cli_args": effective_cli_args,
+        "insecure_registry": insecure_registry,
         "images": [],
     }
 
@@ -173,10 +353,10 @@ def main() -> None:
         dockerfile = dockerfile_for_case(settings["base_image"], case, canary)
         (workdir / "Dockerfile").write_text(dockerfile, encoding="utf-8")
 
-        run(f"docker build -t {shlex.quote(tag)} -f Dockerfile .", cwd=workdir)
+        run(f"{cli_prefix} build -t {shlex.quote(tag)} -f Dockerfile .", cwd=workdir)
 
         if settings["push"]:
-            run(f"docker push {shlex.quote(tag)}")
+            run(f"{cli_prefix} push {shlex.quote(tag)}")
 
         runlist["images"].append(
             {
