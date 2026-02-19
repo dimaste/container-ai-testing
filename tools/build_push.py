@@ -123,8 +123,6 @@ def load_external_cases(settings: dict[str, Any]) -> list[dict[str, Any]]:
 
     cases: list[dict[str, Any]] = []
     prefix = safe_tag(str(settings["external_case_prefix"]))
-    path_template = str(settings["external_file_path_template"])
-
     for idx, item in enumerate(all_prompts, start=1):
         carrier = carriers[(idx - 1) % len(carriers)]
         source_id = safe_tag(item["source_id"])
@@ -134,8 +132,6 @@ def load_external_cases(settings: dict[str, Any]) -> list[dict[str, Any]]:
             "carrier": carrier,
             "payload": item["payload"],
         }
-        if carrier == "file":
-            case["path"] = path_template.format(source=source_id, idx=idx)
         cases.append(case)
 
     return cases
@@ -145,11 +141,10 @@ def expand_cases_to_all_carriers(cases: list[dict[str, Any]], settings: dict[str
     if not settings.get("expand_case_to_all_carriers", False):
         return cases
 
-    carriers = settings.get("expand_carriers", ["label", "env", "file", "cmd"])
+    carriers = settings.get("expand_carriers", ["label", "env", "cmd"])
     if not isinstance(carriers, list) or not carriers:
         raise ValueError("expand_carriers must be a non-empty list")
 
-    path_template = str(settings.get("expand_file_path_template", "/tmp/payload_{id}.txt"))
     expanded: list[dict[str, Any]] = []
     for case in cases:
         payload = case["payload"]
@@ -160,8 +155,6 @@ def expand_cases_to_all_carriers(cases: list[dict[str, Any]], settings: dict[str
                 "carrier": carrier,
                 "payload": payload,
             }
-            if carrier == "file":
-                new_case["path"] = path_template.format(id=base_id, carrier=safe_tag(carrier))
             expanded.append(new_case)
     return expanded
 
@@ -174,6 +167,9 @@ def dockerfile_for_case(base_image: str, case: dict[str, Any], canary: str, sett
     trace_label_prefix = str(settings.get("trace_label_prefix", "org.llmsec"))
     payload_label_key = str(settings.get("payload_label_key", "payload"))
     payload_env_key = str(settings.get("payload_env_key", "PAYLOAD"))
+    ensure_filesystem_layer = bool(settings.get("ensure_filesystem_layer", False))
+    layer_source_file = str(settings.get("layer_source_file", "__llmsec_layer_marker.txt"))
+    layer_target_template = str(settings.get("layer_target_path_template", "/.llmsec/layer_{id}.txt"))
 
     lines = [f"FROM {base_image}"]
     if trace_labels_enabled:
@@ -187,6 +183,10 @@ def dockerfile_for_case(base_image: str, case: dict[str, Any], canary: str, sett
 
     inline_payload = payload.replace("\r", " ").replace("\n", " ").strip()
 
+    if ensure_filesystem_layer:
+        layer_target = layer_target_template.format(id=safe_tag(str(cid)))
+        lines.append(f"COPY {layer_source_file} {layer_target}")
+
     if carrier == "label":
         escaped_payload = escape_docker_quoted(inline_payload)
         lines.append(f'LABEL {payload_label_key}="{escaped_payload}"')
@@ -196,20 +196,6 @@ def dockerfile_for_case(base_image: str, case: dict[str, Any], canary: str, sett
     elif carrier == "cmd":
         escaped = inline_payload.replace("\\", "\\\\").replace("\"", "\\\"")
         lines.append(f'CMD ["sh", "-lc", "echo \"{escaped}\""]')
-    elif carrier == "file":
-        path = case.get("path")
-        if not path:
-            raise ValueError(f"case {cid}: carrier=file requires 'path'")
-        parent = shlex.quote(str(Path(path).parent))
-        target = shlex.quote(path)
-        lines.extend(
-            [
-                f"RUN mkdir -p {parent}",
-                f"RUN cat > {target} << 'EOF'",
-                payload,
-                "EOF",
-            ]
-        )
     else:
         raise ValueError(f"case {cid}: unknown carrier '{carrier}'")
 
@@ -222,8 +208,9 @@ def validate_case(case: dict[str, Any]) -> None:
     if missing:
         raise ValueError(f"case is missing required fields: {', '.join(missing)}")
 
-    if case["carrier"] == "file" and not str(case.get("path", "")).strip():
-        raise ValueError(f"case {case['id']}: carrier=file requires non-empty 'path'")
+    allowed_carriers = {"label", "env", "cmd"}
+    if case["carrier"] not in allowed_carriers:
+        raise ValueError(f"case {case['id']}: unsupported carrier '{case['carrier']}'")
 
 
 def build_image_ref(registry: str, repo: str, image_name: str, tag: str) -> str:
@@ -242,10 +229,14 @@ def default_docker_config_dirs(container_cli: str) -> list[Path]:
         dirs.append(Path(env_dir).expanduser())
 
     home = Path.home()
-    # Most common location for both docker and nerdctl.
-    dirs.append(home / ".docker")
-    # nerdctl may also use config under ~/.config/nerdctl.
-    dirs.append(home / ".config" / "nerdctl")
+    if container_cli == "nerdctl":
+        # Prefer nerdctl-native config first.
+        dirs.append(home / ".config" / "nerdctl")
+        dirs.append(home / ".docker")
+    else:
+        # Docker usually relies on ~/.docker first.
+        dirs.append(home / ".docker")
+        dirs.append(home / ".config" / "nerdctl")
     # Some environments rely on containers auth file location.
     dirs.append(home / ".config" / "containers")
 
@@ -326,18 +317,20 @@ def get_effective_settings(args: argparse.Namespace) -> dict[str, Any]:
         "trace_label_prefix": "org.llmsec",
         "payload_label_key": "payload",
         "payload_env_key": "PAYLOAD",
+        "ensure_filesystem_layer": False,
+        "layer_source_file": "__llmsec_layer_marker.txt",
+        "layer_target_path_template": "/.llmsec/layer_{id}.txt",
         "external_suite": "cases/suite_external.json",
         "include_external_suite": True,
         "expand_case_to_all_carriers": False,
-        "expand_carriers": ["label", "env", "file", "cmd"],
-        "expand_file_path_template": "/usr/share/doc/llmsec/expanded/{id}_{carrier}.txt",
+        "expand_carriers": ["label", "env", "cmd"],
         "external_prompts_enabled": False,
         "external_prompt_manifest": "cases/prompt_sources_promptfoo.json",
         "external_prompts_limit": 0,
         "external_case_prefix": "ext",
-        "external_carrier_cycle": ["label", "env", "file", "cmd"],
-        "external_file_path_template": "/usr/share/doc/llmsec/{source}/payload_{idx:04d}.txt",
+        "external_carrier_cycle": ["label", "env", "cmd"],
         "external_fetch_timeout_seconds": 30,
+        "max_images": 0,
     }
     settings = {**defaults, **config}
 
@@ -355,12 +348,16 @@ def get_effective_settings(args: argparse.Namespace) -> dict[str, Any]:
         "registry",
         "repo",
         "image_name",
+        "ensure_filesystem_layer",
+        "layer_source_file",
+        "layer_target_path_template",
         "suite",
         "external_suite",
         "include_external_suite",
         "outdir",
         "tag_prefix",
         "timestamp_format",
+        "max_images",
     ]:
         value = getattr(args, key, None)
         if value is not None:
@@ -395,6 +392,7 @@ def main() -> None:
     parser.add_argument("--outdir")
     parser.add_argument("--tag-prefix", dest="tag_prefix")
     parser.add_argument("--timestamp-format", dest="timestamp_format")
+    parser.add_argument("--max-images", dest="max_images", type=int)
 
     parser.add_argument("--push", action="store_true", help="Override config: push images")
     parser.add_argument("--no-push", action="store_true", help="Override config: do not push images")
@@ -462,6 +460,10 @@ def main() -> None:
     cases.extend(external_cases)
     cases = expand_cases_to_all_carriers(cases, settings)
 
+    max_images = int(settings.get("max_images", 0))
+    if max_images > 0:
+        cases = cases[:max_images]
+
     for case in cases:
         validate_case(case)
 
@@ -481,6 +483,7 @@ def main() -> None:
         "external_suite": settings["external_suite"] if settings["include_external_suite"] else None,
         "external_suite_cases_count": len(external_suite_cases),
         "external_cases_count": len(external_cases),
+        "max_images": max_images,
         "container_cli": container_cli,
         "container_cli_args": effective_cli_args,
         "docker_config": str(docker_config_dir),
@@ -507,6 +510,10 @@ def main() -> None:
         workdir.mkdir(parents=True, exist_ok=True)
 
         dockerfile = dockerfile_for_case(settings["base_image"], case, canary, settings)
+        if bool(settings.get("ensure_filesystem_layer", False)):
+            marker_name = str(settings.get("layer_source_file", "__llmsec_layer_marker.txt"))
+            marker_content = f"case_id={case['id']}\ncarrier={case['carrier']}\ncanary={canary}\n"
+            (workdir / marker_name).write_text(marker_content, encoding="utf-8")
         (workdir / "Dockerfile").write_text(dockerfile, encoding="utf-8")
 
         run(f"{cli_prefix} build -t {shlex.quote(tag)} -f Dockerfile .", cwd=workdir)

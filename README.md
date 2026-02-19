@@ -27,6 +27,7 @@ Edit `config/build_push.config.json`:
 - `repo`: repository/group path in registry
 - `image_name`: image name inside repository path
 - `suite`: path to cases JSON
+- `max_images`: cap how many cases to build (0 = no cap, otherwise first N records after all merges/expansion)
 - `external_suite`: path to external cases JSON
 - `include_external_suite`: include `external_suite` in build/push run
 - `outdir`: output folder
@@ -37,15 +38,16 @@ Edit `config/build_push.config.json`:
 - `trace_labels_enabled`: add/remove internal trace labels (`case_id`, `canary`, `carrier`)
 - `payload_label_key`: label key used for `label` carrier (default: `payload`)
 - `payload_env_key`: env var key used for `env` carrier (default: `PAYLOAD`)
+- `ensure_filesystem_layer`: if `true`, adds a minimal `COPY` step for each image to guarantee a filesystem layer
+- `layer_source_file`: marker file name copied during build
+- `layer_target_path_template`: destination path template for marker file in image
 - `expand_case_to_all_carriers`: if `true`, each case is duplicated into all carriers
 - `expand_carriers`: carrier list used by expansion
-- `expand_file_path_template`: file path template used for expanded `file` cases
 - `external_prompts_enabled`: include external prompts into generated test cases
 - `external_prompt_manifest`: file with external sources (URL + parser settings)
 - `external_prompts_limit`: cap for total external prompts
 - `external_case_prefix`: prefix for generated external case ids
 - `external_carrier_cycle`: carriers used for generated external cases
-- `external_file_path_template`: file path template for generated `file` carrier cases
 - `external_fetch_timeout_seconds`: timeout for fetching remote datasets
 
 ## Run
@@ -140,6 +142,7 @@ python3 tools/build_push.py \
   --repo llmsec \
   --image-name llmsec-mutated \
   --suite cases/suite_basic.json \
+  --max-images 10 \
   --push
 ```
 
@@ -157,7 +160,21 @@ Output:
   - image tag
   - canary
   - carrier
-  - path (if file carrier)
   - payload preview
   - selected container tool (`docker` or `nerdctl`)
   - number of appended external cases
+
+## Layers
+
+`LABEL` and `ENV` update image config metadata and do not always create a filesystem layer by themselves.
+If you need a guaranteed layer per image, keep:
+
+```json
+"ensure_filesystem_layer": true
+```
+
+This adds a minimal `COPY` marker step in each generated Dockerfile.
+
+`FROM scratch` minimal pattern:
+- use `COPY`-based layer marker (`ensure_filesystem_layer=true`)
+- carriers `label/env/cmd` are supported

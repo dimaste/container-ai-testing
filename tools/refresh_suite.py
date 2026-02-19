@@ -79,7 +79,7 @@ def main() -> None:
         default='cases/suite_external.json',
         help='Path to output external suite JSON',
     )
-    parser.add_argument('--carrier', default='label', help='Carrier for generated external cases (label/env/file/cmd)')
+    parser.add_argument('--carrier', default='label', help='Carrier for generated external cases (label/env/cmd)')
     parser.add_argument('--id-prefix', default='cyberseceval_en', help='Prefix for generated external case IDs')
     parser.add_argument('--source-id', default='promptfoo_cyberseceval_en', help='Source id from manifest to use')
     parser.add_argument('--timeout-seconds', type=int, default=30, help='HTTP timeout for external source fetch')
